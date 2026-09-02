@@ -1,4 +1,4 @@
-"""Slot Descriptors & State Management."""
+"""Slot Descriptors & Epoch Token Authority."""
 from enum import Enum
 
 class SlotState(Enum):
@@ -12,6 +12,7 @@ class BufferSlot:
     def __init__(self, slot_idx: int):
         self.slot_idx = slot_idx
         self.current_lease_id = 0
+        self.lease_epoch = 0
         self.stream_id = 0
         self.sequence_no = 0
         self.priority = 0
@@ -31,8 +32,9 @@ class BufferSlot:
     def is_committed_unread(self) -> bool:
         return self.state == SlotState.COMMITTED
 
-    def allocate_lease(self, lease_id: int, stream_id: int, seq_no: int, priority: int, expiry_tick: int):
+    def allocate_lease(self, lease_id: int, stream_id: int, seq_no: int, priority: int, expiry_tick: int, epoch: int):
         self.current_lease_id = lease_id
+        self.lease_epoch = epoch
         self.stream_id = stream_id
         self.sequence_no = seq_no
         self.priority = priority
