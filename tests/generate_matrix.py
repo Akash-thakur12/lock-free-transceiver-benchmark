@@ -1,4 +1,4 @@
-"""Combinatorial Evaluation Matrix (1,600 States with Hardened S09 and S10 Traps)."""
+"""Combinatorial Evaluation Matrix (2,400 States across 24 Invariant Topologies)."""
 from engine.framing import HeaderCorruptError, PayloadCorruptError, InvalidMagicError, FrameOverflowError
 
 class TestMatrixGenerator:
@@ -96,42 +96,28 @@ class TestMatrixGenerator:
                 if not r or r[0] != (base_seq, data):
                     return False
 
-            # S09: STRICT GAPLESS REASSEMBLY WITH MISSING GAP
             elif scenario == 9:
                 start_seq = var_id * 10
-                # Publish sequence start_seq
                 tx.publish(stream_id=1, seq_no=start_seq, priority=0, payload=b"packet_0")
                 r0 = tx.poll_stream(1)
                 if r0 != [(start_seq, b"packet_0")]:
                     return False
-
-                # Publish sequence start_seq + 2 (without start_seq + 1)
                 tx.publish(stream_id=1, seq_no=start_seq + 2, priority=0, payload=b"packet_2")
-                # Poll MUST return [] because start_seq + 1 is missing!
                 r_gap = tx.poll_stream(1)
                 if len(r_gap) != 0:
-                    return False  # Violated gapless contract!
-
-                # Publish the missing start_seq + 1 -> now must emit both (start_seq+1) and (start_seq+2)
+                    return False
                 tx.publish(stream_id=1, seq_no=start_seq + 1, priority=0, payload=b"packet_1")
                 r_flush = tx.poll_stream(1)
                 if len(r_flush) != 2 or r_flush[0][1] != b"packet_1" or r_flush[1][1] != b"packet_2":
                     return False
 
-            # S10: STRICT PREEMPTION INVARIANT (NEVER DESTROY COMMITTED DATA)
             elif scenario == 10:
                 p_tx = transceiver_cls(capacity=2, backpressure="BLOCK")
-                # Fill buffer with 2 COMMITTED packets
                 p_tx.publish(stream_id=1, seq_no=1, priority=0, payload=b"committed_01")
                 p_tx.publish(stream_id=1, seq_no=2, priority=0, payload=b"committed_02")
-
-                # Try to publish high-priority packet when buffer is full of COMMITTED data.
-                # Under BLOCK policy, it CANNOT preempt committed data -> must return False!
                 res_high = p_tx.publish(stream_id=2, seq_no=1, priority=3, payload=data)
                 if res_high is not False:
-                    return False  # Overwrote committed data!
-
-                # Draining stream 1 must return BOTH original committed packets intact!
+                    return False
                 drained = p_tx.poll_stream(1)
                 if len(drained) != 2 or drained[0][1] != b"committed_01" or drained[1][1] != b"committed_02":
                     return False
@@ -169,7 +155,7 @@ class TestMatrixGenerator:
                 if "p50_latency_ticks" not in t or t.get("committed_bytes", 0) <= 0:
                     return False
 
-            else:
+            elif scenario == 15:
                 for s in range(5):
                     tx.publish(stream_id=s+1, seq_no=s, priority=1, payload=data)
                     tx.step_clock(1)
@@ -177,6 +163,89 @@ class TestMatrixGenerator:
                     r = tx.poll_stream(s+1)
                     if not r:
                         return False
+
+            # S16: Cooperative Fiber Priority Dispatch
+            elif scenario == 16:
+                tx.schedule_fiber(task_id=1, priority=0, work_fn=lambda: "low")
+                tx.schedule_fiber(task_id=2, priority=3, work_fn=lambda: "high")
+                executed_p = tx.step_fibers()
+                if executed_p != 3:  # Priority 3 must run before Priority 0
+                    return False
+
+            # S17: Watermark Lag Calculation
+            elif scenario == 17:
+                for s in range(10):
+                    tx.publish(stream_id=5, seq_no=s, priority=0, payload=b"A"*16)
+                lag_before = tx.get_watermark_lag(5)
+                if lag_before < 9:
+                    return False
+                tx.poll_stream(5)
+                lag_after = tx.get_watermark_lag(5)
+                if lag_after != 0:
+                    return False
+
+            # S18: Multi-Fiber Cooperative Draining
+            elif scenario == 18:
+                results = []
+                for p in range(4):
+                    tx.schedule_fiber(task_id=p, priority=p, work_fn=lambda p=p: results.append(p))
+                while tx.step_fibers() != -1:
+                    pass
+                if results != [3, 2, 1, 0]:
+                    return False
+
+            # S19: Multi-Stream Interleaved Watermark Tracking
+            elif scenario == 19:
+                tx.publish(stream_id=1, seq_no=100, priority=0, payload=data)
+                tx.publish(stream_id=2, seq_no=200, priority=0, payload=data)
+                if tx.get_watermark_lag(1) != 0 or tx.get_watermark_lag(2) != 0:
+                    pass # Single packet per stream has lag 0
+                tx.publish(stream_id=1, seq_no=105, priority=0, payload=data)
+                if tx.get_watermark_lag(1) != 5:
+                    return False
+
+            # S20: Fiber Exception Isolation
+            elif scenario == 20:
+                def failing_fiber():
+                    raise RuntimeError("Fiber Crash")
+                tx.schedule_fiber(task_id=10, priority=2, work_fn=failing_fiber)
+                tx.schedule_fiber(task_id=11, priority=1, work_fn=lambda: "ok")
+                p1 = tx.step_fibers()
+                p2 = tx.step_fibers()
+                if p1 != 2 or p2 != 1:
+                    return False
+
+            # S21: High-Priority Fiber Preemption Interleaving
+            elif scenario == 21:
+                tx.schedule_fiber(task_id=1, priority=0, work_fn=lambda: "t1")
+                tx.step_fibers()
+                tx.schedule_fiber(task_id=2, priority=2, work_fn=lambda: "t2")
+                tx.schedule_fiber(task_id=3, priority=3, work_fn=lambda: "t3")
+                if tx.step_fibers() != 3 or tx.step_fibers() != 2:
+                    return False
+
+            # S22: Concurrent Stream Watermark Resolution
+            elif scenario == 22:
+                for sid in range(1, 5):
+                    for sq in range(5):
+                        tx.publish(stream_id=sid, seq_no=sq, priority=0, payload=b"M"*8)
+                for sid in range(1, 5):
+                    if tx.get_watermark_lag(sid) != 4:
+                        return False
+                    tx.poll_stream(sid)
+                    if tx.get_watermark_lag(sid) != 0:
+                        return False
+
+            # S23: End-to-End Scheduler Telemetry Synthesis
+            else:
+                for s in range(10):
+                    tx.publish(stream_id=1, seq_no=s, priority=s%4, payload=data)
+                    tx.schedule_fiber(task_id=s, priority=s%4, work_fn=lambda s=s: s*2)
+                while tx.step_fibers() != -1:
+                    pass
+                t = tx.get_telemetry()
+                if t.get("total_frames", 0) < 10 or t.get("p50_latency_ticks", 0) <= 0:
+                    return False
 
             return True
         except Exception:

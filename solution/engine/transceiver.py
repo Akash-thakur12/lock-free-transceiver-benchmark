@@ -1,9 +1,11 @@
-"""Transceiver Main Coordinator Engine (Gapless Reassembly Wired)."""
+"""Transceiver Main Coordinator Engine (Multi-Subsystem Architecture)."""
 from engine.framing import encode_full_frame, decode_full_frame
 from engine.buffer import MPMCRingBuffer
 from engine.reassembly import ReassemblyEngine
 from engine.scheduler import VirtualClock
+from engine.scheduler.fiber_scheduler import CooperativeFiberScheduler
 from engine.telemetry import TransactionLogger, LatencyHistogram, MetricsExporter
+from engine.telemetry.audit_watermark import StreamWatermarkAuditor
 
 
 class Transceiver:
@@ -11,6 +13,8 @@ class Transceiver:
         self.ring_buffer = MPMCRingBuffer(capacity=capacity, backpressure=backpressure)
         self.reassembly = ReassemblyEngine()
         self.clock = VirtualClock()
+        self.fibers = CooperativeFiberScheduler()
+        self.watermarks = StreamWatermarkAuditor()
         self.logger = TransactionLogger()
         self.histogram = LatencyHistogram()
         self.exporter = MetricsExporter(self.logger, self.histogram)
@@ -31,6 +35,7 @@ class Transceiver:
         # Encode and commit to ring buffer slot
         encoded = self.encode_frame(stream_id, seq_no, flags, payload)
         self.ring_buffer.commit_lease(lease_id, encoded)
+        self.watermarks.record_commit(stream_id, seq_no)
 
         latency = self.clock.current_tick - start_tick + 1
         self.histogram.record_latency(latency)
@@ -38,18 +43,24 @@ class Transceiver:
         return True
 
     def poll_stream(self, stream_id: int) -> list[tuple[int, bytes]]:
-        # Drain unconsumed committed slots from ring buffer
         raw_slots = self.ring_buffer.drain_stream_slots(stream_id)
-        
-        # Ingest each raw slot into the ReassemblyEngine to enforce strict gapless order
         ready_packets = []
         for seq_no, payload_bytes in sorted(raw_slots, key=lambda x: x[0]):
             meta, payload = self.decode_frame(payload_bytes)
-            # Ingest into sliding window reassembler
             emitted = self.reassembly.ingest(stream_id, meta["sequence_no"], payload)
+            for s, _ in emitted:
+                self.watermarks.record_drain(stream_id, s)
             ready_packets.extend(emitted)
-            
         return ready_packets
+
+    def schedule_fiber(self, task_id: int, priority: int, work_fn):
+        self.fibers.spawn(task_id, priority, work_fn)
+
+    def step_fibers(self) -> int:
+        return self.fibers.step()
+
+    def get_watermark_lag(self, stream_id: int) -> int:
+        return self.watermarks.compute_lag(stream_id)
 
     def step_clock(self, ticks: int = 1):
         self.clock.tick(ticks)
