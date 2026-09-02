@@ -20,7 +20,22 @@ class Transceiver:
         ...
 
     def decode_frame(self, frame_bytes: bytes) -> tuple[dict, bytes]:
-        """Decodes a binary frame, verifying Header CRC-16 first, then Magic/Flags, then Payload CRC-32."""
+        """Decodes a binary frame, verifying Header CRC-16 first, then Magic/Flags, then Payload CRC-32.
+        
+        Returns:
+            tuple[dict, bytes]: (metadata_dict, payload_bytes)
+            where metadata_dict MUST contain the exact keys:
+            {
+                "magic": int,          # uint32 MAGIC (0x54585258)
+                "flags": int,          # uint8 flags
+                "reserved": int,       # uint8 reserved byte (0x00)
+                "stream_id": int,      # uint16 stream identifier
+                "sequence_no": int,    # uint64 sequence number
+                "payload_len": int,    # uint16 payload length in bytes
+                "header_crc": int,     # uint16 header CRC-16
+                "frame_crc": int       # uint32 full frame CRC-32
+            }
+        """
         ...
 
     def publish(self, stream_id: int, seq_no: int, priority: int, payload: bytes, flags: int = 0) -> bool:

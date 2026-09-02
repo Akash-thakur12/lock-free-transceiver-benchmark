@@ -48,7 +48,8 @@ def eval_tier1_wire_framing(Transceiver, HeaderCorruptError, PayloadCorruptError
             return 0.0
 
         meta, payload = tx.decode_frame(raw)
-        if meta["magic"] != 0x54585258 or meta["stream_id"] != 42 or meta["sequence_no"] != 1001 or payload != b"test_payload_123":
+        seq_val = meta.get("sequence_no", meta.get("seq_no"))
+        if meta.get("magic") != 0x54585258 or meta.get("stream_id") != 42 or seq_val != 1001 or payload != b"test_payload_123":
             return 0.0
 
         # Boundary checks: 4096 succeeds, 4097 raises STRICT FrameOverflowError
