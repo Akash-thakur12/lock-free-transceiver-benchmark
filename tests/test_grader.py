@@ -165,18 +165,18 @@ def eval_tier4_matrix_stress(Transceiver) -> tuple[float, int]:
         from generate_matrix import TestMatrixGenerator
 
     passed = 0
-    for scenario in range(24):
+    for scenario in range(32):
         for var_id in range(100):
             if TestMatrixGenerator.run_case(Transceiver, scenario, var_id):
                 passed += 1
-    score = (passed / 2400.0) * 0.250
+    score = (passed / 3200.0) * 0.250
     return score, passed
 
 
 def run_grader(engine_dir: str) -> dict:
     is_clean, msg = scan_anti_cheat(engine_dir)
     if not is_clean:
-        return {"tier1_framing": 0.0, "tier2_mpmc": 0.0, "tier3_reassembly": 0.0, "tier4_matrix": 0.0, "matrix_passed": 0, "matrix_total": 2400, "score": 0.0, "error": msg}
+        return {"tier1_framing": 0.0, "tier2_mpmc": 0.0, "tier3_reassembly": 0.0, "tier4_matrix": 0.0, "matrix_passed": 0, "matrix_total": 3200, "score": 0.0, "error": msg}
 
     for mod_name in list(sys.modules.keys()):
         if mod_name == "engine" or mod_name.startswith("engine."):
@@ -196,7 +196,7 @@ def run_grader(engine_dir: str) -> dict:
         InvalidMagicError = getattr(codec_mod, "InvalidMagicError")
         FrameOverflowError = getattr(codec_mod, "FrameOverflowError")
     except Exception as e:
-        return {"tier1_framing": 0.0, "tier2_mpmc": 0.0, "tier3_reassembly": 0.0, "tier4_matrix": 0.0, "matrix_passed": 0, "matrix_total": 2400, "score": 0.0, "error": str(e)}
+        return {"tier1_framing": 0.0, "tier2_mpmc": 0.0, "tier3_reassembly": 0.0, "tier4_matrix": 0.0, "matrix_passed": 0, "matrix_total": 3200, "score": 0.0, "error": str(e)}
 
     print("=== EXECUTING 4-TIER LOCK-FREE TRANSCEIVER GRADER ===")
     t1 = eval_tier1_wire_framing(Transceiver, HeaderCorruptError, PayloadCorruptError, InvalidMagicError, FrameOverflowError)
@@ -209,7 +209,7 @@ def run_grader(engine_dir: str) -> dict:
     print(f"  [TIER 3] Reassembly & Telemetry     : {t3:.3f} / 0.250")
 
     t4, m_passed = eval_tier4_matrix_stress(Transceiver)
-    print(f"  [TIER 4] 2,400-State Matrix Stress  : {t4:.3f} / 0.250 ({m_passed}/2400 passed)")
+    print(f"  [TIER 4] 3,200-State Matrix Stress  : {t4:.3f} / 0.250 ({m_passed}/3200 passed)")
 
     total_score = t1 + t2 + t3 + t4
     return {
@@ -218,7 +218,7 @@ def run_grader(engine_dir: str) -> dict:
         "tier3_reassembly": round(t3, 3),
         "tier4_matrix": round(t4, 3),
         "matrix_passed": m_passed,
-        "matrix_total": 2400,
+        "matrix_total": 3200,
         "score": round(total_score, 4)
     }
 

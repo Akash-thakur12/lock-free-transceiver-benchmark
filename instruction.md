@@ -1,7 +1,7 @@
 # Task: High-Throughput Lock-Free Ring Buffer & Zero-Copy Transceiver
 
 ## Overview
-Implement a high-performance, discrete-event packet transceiver engine in Python (`engine/`). The system manages multi-stream binary packet encoding/decoding, lock-free ring buffering with priority preemption, gapless out-of-order reassembly, cooperative fiber scheduling, and microsecond-level telemetry.
+Implement a high-performance, discrete-event packet transceiver engine in Python (`engine/`). The system manages multi-stream binary packet encoding/decoding, lock-free ring buffering with priority preemption, gapless out-of-order reassembly, cooperative fiber scheduling, crash-recovery state snapshots, and microsecond-level telemetry.
 
 ---
 
@@ -39,7 +39,8 @@ class Transceiver:
         ...
 
     def publish(self, stream_id: int, seq_no: int, priority: int, payload: bytes, flags: int = 0) -> bool:
-        """Publishes a packet into the ring buffer with priority (0=Normal, 1=Medium, 2=High, 3=Critical). Returns True on success, False if dropped."""
+        """Publishes a packet into the ring buffer with priority (0=Normal, 1=Medium, 2=High, 3=Critical).
+        Returns True on success, False if dropped under backpressure OR rejected as an already-committed duplicate."""
         ...
 
     def poll_stream(self, stream_id: int) -> list[tuple[int, bytes]]:
@@ -56,6 +57,16 @@ class Transceiver:
 
     def get_watermark_lag(self, stream_id: int) -> int:
         """Returns the watermark lag (high_watermark - low_watermark) for a given stream."""
+        ...
+
+    def snapshot(self) -> bytes:
+        """Serializes the full internal state (ring buffer slots, reassembly windows, watermarks, clock, committed history) into a compact binary checkpoint envelope."""
+        ...
+
+    def restore(self, snapshot_bytes: bytes):
+        """Restores complete transceiver internal state from a binary checkpoint.
+        Subsequent publish/poll_stream operations behave identically to before the snapshot.
+        Republishing any (stream_id, seq_no) packet that was already committed prior to the snapshot MUST be detected as a duplicate and rejected (publish returns False)."""
         ...
 
     def step_clock(self, ticks: int = 1):
@@ -159,9 +170,21 @@ class Transceiver:
 
 ---
 
-## 6. Evaluation & Rubric
+## 6. Crash-Recovery Checkpoint Persistence & Idempotency
+
+1. **Deterministic State Snapshot:**
+   * `snapshot() -> bytes` produces an encoded, self-contained binary checkpoint containing the full internal state: ring buffer slots, uncommitted active leases, reassembly windows, out-of-order min-heaps, watermark counters, and committed packet history.
+2. **Lossless State Restoration:**
+   * `restore(snapshot_bytes: bytes) -> None` reconstructs the complete internal state. Subsequent operations (`publish`, `poll_stream`, `step_fibers`, `get_watermark_lag`) continue seamlessly from the snapshot point.
+   * Invalid or corrupted snapshot byte strings must raise `ValueError`.
+3. **Strict Idempotent Duplicate Rejection:**
+   * Any subsequent call to `publish(stream_id, seq_no, ...)` for a packet that was already committed prior to the snapshot MUST be detected as a duplicate and rejected (`publish()` returns `False`), preventing duplicate commits or sequence corruption.
+
+---
+
+## 7. Evaluation & Rubric
 
 * **Tier 1 (25%):** Binary wire framing, nested CRC-16/CRC-32 verification, integrity ordering.
 * **Tier 2 (25%):** MPMC ring buffer, power-of-two linear probing, uint64 wraparound ($2^{64}-16 	o 0$).
 * **Tier 3 (25%):** Gapless sliding window reassembly, dynamic stream initialization, telemetry percentiles.
-* **Tier 4 (25%):** 2,400-state combinatorial stress matrix across 24 invariant topologies (including fiber priority dispatch and watermark lag).
+* **Tier 4 (25%):** 3,200-state combinatorial stress matrix across 32 invariant topologies (including fiber priority dispatch, watermark lag, crash-recovery restore, and idempotent deduplication).

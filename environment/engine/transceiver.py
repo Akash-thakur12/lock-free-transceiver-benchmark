@@ -26,6 +26,12 @@ class Transceiver:
     def get_watermark_lag(self, stream_id: int) -> int:
         return 0
 
+    def snapshot(self) -> bytes:
+        return b""
+
+    def restore(self, snapshot_bytes: bytes):
+        pass
+
     def step_clock(self, ticks: int = 1):
         pass
 

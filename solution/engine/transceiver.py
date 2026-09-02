@@ -1,4 +1,4 @@
-"""Transceiver Main Coordinator Engine (Multi-Subsystem Architecture)."""
+"""Transceiver Main Coordinator Engine with Checkpoint Persistence & Idempotency."""
 from engine.framing import encode_full_frame, decode_full_frame
 from engine.buffer import MPMCRingBuffer
 from engine.reassembly import ReassemblyEngine
@@ -6,10 +6,13 @@ from engine.scheduler import VirtualClock
 from engine.scheduler.fiber_scheduler import CooperativeFiberScheduler
 from engine.telemetry import TransactionLogger, LatencyHistogram, MetricsExporter
 from engine.telemetry.audit_watermark import StreamWatermarkAuditor
+from engine.persistence import CheckpointManager
 
 
 class Transceiver:
     def __init__(self, capacity: int = 128, backpressure: str = "BLOCK"):
+        self.capacity = capacity
+        self.backpressure = backpressure
         self.ring_buffer = MPMCRingBuffer(capacity=capacity, backpressure=backpressure)
         self.reassembly = ReassemblyEngine()
         self.clock = VirtualClock()
@@ -18,6 +21,7 @@ class Transceiver:
         self.logger = TransactionLogger()
         self.histogram = LatencyHistogram()
         self.exporter = MetricsExporter(self.logger, self.histogram)
+        self.persistence = CheckpointManager()
 
     def encode_frame(self, stream_id: int, seq_no: int, flags: int, payload: bytes) -> bytes:
         return encode_full_frame(stream_id, seq_no, flags, payload)
@@ -26,6 +30,10 @@ class Transceiver:
         return decode_full_frame(frame_bytes)
 
     def publish(self, stream_id: int, seq_no: int, priority: int, payload: bytes, flags: int = 0) -> bool:
+        # Idempotency check: reject already-committed packets
+        if self.persistence.is_duplicate(stream_id, seq_no):
+            return False
+
         start_tick = self.clock.current_tick
         lease_id = self.ring_buffer.acquire_lease(stream_id, seq_no, priority, start_tick)
         if lease_id == -1:
@@ -36,6 +44,7 @@ class Transceiver:
         encoded = self.encode_frame(stream_id, seq_no, flags, payload)
         self.ring_buffer.commit_lease(lease_id, encoded)
         self.watermarks.record_commit(stream_id, seq_no)
+        self.persistence.record_commit(stream_id, seq_no)
 
         latency = self.clock.current_tick - start_tick + 1
         self.histogram.record_latency(latency)
@@ -47,7 +56,8 @@ class Transceiver:
         ready_packets = []
         for seq_no, payload_bytes in sorted(raw_slots, key=lambda x: x[0]):
             meta, payload = self.decode_frame(payload_bytes)
-            emitted = self.reassembly.ingest(stream_id, meta["sequence_no"], payload)
+            seq_val = meta.get("sequence_no", meta.get("seq_no"))
+            emitted = self.reassembly.ingest(stream_id, seq_val, payload)
             for s, _ in emitted:
                 self.watermarks.record_drain(stream_id, s)
             ready_packets.extend(emitted)
@@ -61,6 +71,14 @@ class Transceiver:
 
     def get_watermark_lag(self, stream_id: int) -> int:
         return self.watermarks.compute_lag(stream_id)
+
+    def snapshot(self) -> bytes:
+        """Serializes the full internal state into a binary checkpoint."""
+        return self.persistence.serialize_state(self)
+
+    def restore(self, snapshot_bytes: bytes):
+        """Restores full internal state from a binary checkpoint."""
+        self.persistence.deserialize_state(self, snapshot_bytes)
 
     def step_clock(self, ticks: int = 1):
         self.clock.tick(ticks)
