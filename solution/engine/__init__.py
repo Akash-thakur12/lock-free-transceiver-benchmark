@@ -1,14 +1,16 @@
 """Lock-Free Transceiver Package."""
 from .transceiver import Transceiver
-from .codec import (
-    TransceiverError, InvalidMagicError, HeaderCorruptError,
-    PayloadCorruptError, FrameOverflowError, BufferOverflowError,
-    SlotStateViolationError, encode_frame, decode_frame
+from .framing import (
+    TransceiverFramingError, InvalidMagicError, HeaderCorruptError,
+    PayloadCorruptError, FrameOverflowError
 )
+from .buffer import BufferError, BufferOverflowError, SlotStateViolationError
+
+TransceiverError = TransceiverFramingError
 
 __all__ = [
-    "Transceiver", "TransceiverError", "InvalidMagicError",
-    "HeaderCorruptError", "PayloadCorruptError", "FrameOverflowError",
-    "BufferOverflowError", "SlotStateViolationError",
-    "encode_frame", "decode_frame"
+    "Transceiver", "TransceiverError", "TransceiverFramingError",
+    "InvalidMagicError", "HeaderCorruptError", "PayloadCorruptError",
+    "FrameOverflowError", "BufferError", "BufferOverflowError",
+    "SlotStateViolationError"
 ]

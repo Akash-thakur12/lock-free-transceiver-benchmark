@@ -1,5 +1,4 @@
 """Transceiver Starter Scaffold."""
-from engine.codec import TransceiverError
 
 class Transceiver:
     def __init__(self, capacity: int = 128, backpressure: str = "BLOCK"):
