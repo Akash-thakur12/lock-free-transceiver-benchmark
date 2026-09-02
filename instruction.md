@@ -137,7 +137,7 @@ class Transceiver:
 5. **Backpressure Modes:**
    * `BLOCK`: Fails acquisition and returns `False` if no uncommitted slot can be allocated or preempted.
    * `DROP_OLDEST`: Evicts the slot with the lowest sequence number among committed slots.
-   * `REJECT`: Immediately returns `False` without waiting.
+   * `REJECT`: Immediately returns `False` without waiting or evicting; existing committed data remains intact.
 
 ---
 
@@ -158,9 +158,10 @@ class Transceiver:
 
 ## 5. Cooperative Fiber Scheduler & Watermark Telemetry
 
-1. **Priority Fiber Scheduling:**
+1. **Priority Fiber Scheduling & Fault Isolation Contract:**
    * `schedule_fiber(task_id, priority, work_fn)` stages callable tasks into priority queues (0 to 3).
-   * `step_fibers()` pops and executes the highest-priority available task first (Priority 3 > 2 > 1 > 0) with quantum allocations. Returns executed priority or -1 if queues are empty.
+   * `step_fibers()` pops and executes the highest-priority available task first (Priority 3 > 2 > 1 > 0) with quantum allocations (Priority 0 $	o$ 1 tick, Priority 1 $	o$ 2 ticks, Priority 2 $	o$ 3 ticks, Priority 3 $	o$ 4 ticks). Returns executed priority or -1 if queues are empty.
+   * **Exception-Swallowing Fault Isolation Contract (Hard Requirement):** When `step_fibers()` executes a fiber's `work_fn`, if `work_fn` raises ANY exception, the exception MUST be caught internally and NEVER propagated to the caller. The fiber is treated as having completed its turn, `step_fibers()` still returns that executed fiber's priority integer, and subsequent calls to `step_fibers()` proceed normally to the next queued fiber without interruption.
 2. **Stream Watermark Auditing:**
    * High-watermark tracks the highest committed sequence number per stream.
    * Low-watermark tracks the lowest unconsumed sequence number per stream.
@@ -187,4 +188,4 @@ class Transceiver:
 * **Tier 1 (25%):** Binary wire framing, nested CRC-16/CRC-32 verification, integrity ordering.
 * **Tier 2 (25%):** MPMC ring buffer, power-of-two linear probing, uint64 wraparound ($2^{64}-16 	o 0$).
 * **Tier 3 (25%):** Gapless sliding window reassembly, dynamic stream initialization, telemetry percentiles.
-* **Tier 4 (25%):** 3,200-state combinatorial stress matrix across 32 invariant topologies (including fiber priority dispatch, watermark lag, crash-recovery restore, and idempotent deduplication).
+* **Tier 4 (25%):** 3,300-state combinatorial stress matrix across 33 invariant topologies (including fiber priority dispatch, fault isolation, watermark lag, crash-recovery restore, idempotent deduplication, and REJECT backpressure policy).

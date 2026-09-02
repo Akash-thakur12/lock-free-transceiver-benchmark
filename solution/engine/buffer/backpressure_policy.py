@@ -11,7 +11,7 @@ class BackpressureController:
     @staticmethod
     def handle_saturation(policy: str, slots: list) -> int:
         if policy == BackpressurePolicy.REJECT.value:
-            raise BufferOverflowError("Ring buffer is saturated (REJECT policy)")
+            return -1  # Reject immediately without waiting or evicting
         elif policy == BackpressurePolicy.DROP_OLDEST.value:
             # Genuine DROP_OLDEST: find the unconsumed committed slot with lowest sequence_no / turn
             oldest_idx = -1

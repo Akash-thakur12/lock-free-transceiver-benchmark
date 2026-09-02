@@ -1,4 +1,4 @@
-"""Combinatorial Evaluation Matrix (3,200 States across 32 Invariant Topologies)."""
+"""Combinatorial Evaluation Matrix (3,300 States across 33 Invariant Topologies)."""
 from engine.framing import HeaderCorruptError, PayloadCorruptError, InvalidMagicError, FrameOverflowError
 
 class TestMatrixGenerator:
@@ -346,7 +346,7 @@ class TestMatrixGenerator:
                     pass
 
             # S31: Multi-Cycle Checkpoint Load
-            else:
+            elif scenario == 31:
                 for cycle in range(3):
                     tx.publish(stream_id=1, seq_no=cycle, priority=0, payload=data)
                     snap = tx.snapshot()
@@ -354,6 +354,21 @@ class TestMatrixGenerator:
                     tx.restore(snap)
                 drained = tx.poll_stream(1)
                 if len(drained) != 3:
+                    return False
+
+            # S32: REJECT Backpressure Immediate Rejection
+            else:
+                rej_tx = transceiver_cls(capacity=4, backpressure="REJECT")
+                for s in range(4):
+                    if not rej_tx.publish(stream_id=1, seq_no=s, priority=0, payload=b"fill_" + bytes([s])):
+                        return False
+                # 5th publish into saturated REJECT buffer MUST return False immediately
+                rej_res = rej_tx.publish(stream_id=1, seq_no=4, priority=0, payload=b"overflow")
+                if rej_res is not False:
+                    return False
+                # Original 4 committed slots must remain 100% intact and pollable
+                drained = rej_tx.poll_stream(1)
+                if len(drained) != 4 or [p[0] for p in drained] != [0, 1, 2, 3]:
                     return False
 
             return True
