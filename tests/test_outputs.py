@@ -63,4 +63,4 @@ def test_transceiver_benchmark():
     finally:
         emit_reward_file(score)
 
-    assert score >= 0.50, f"Benchmark score {score:.4f} below passing threshold 0.50 (Matrix passed: {res.get('matrix_passed', 0)}/1600)"
+    assert score >= 0.50, f"Benchmark score {score:.4f} below passing threshold 0.50 (Matrix passed: {res.get('matrix_passed', 0)}/3300)"
