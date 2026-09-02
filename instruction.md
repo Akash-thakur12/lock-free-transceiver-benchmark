@@ -1,99 +1,97 @@
-# Discrete-Event Lock-Free Ring Buffer & Zero-Copy Framing Transceiver Benchmark
+# Task: High-Throughput Lock-Free Ring Buffer & Zero-Copy Transceiver
 
-## Objective
-Implement a high-performance, deterministic **Discrete-Event Lock-Free Ring Buffer & Zero-Copy Framing Transceiver Engine** supporting nested CRC binary framing, turn-based MPMC slot leasing, priority lease preemption, gapless sliding-window reassembly, and lock-free telemetry logging across a **1,600-state combinatorial stress matrix**.
-
----
-
-## Technical Specifications & Wire Protocol
-
-### 1. 20-Byte Big-Endian Header & Frame Layout
-Every transmitted frame consists of a 20-byte header, an $N$-byte payload ($0 \le N \le 4096$), and a 4-byte trailing Frame CRC-32:
-
-| Field Name | Offset | Length | Type | Description |
-|:---|:---:|:---:|:---:|:---|
-| **`MAGIC`** | `0x00` | 4 Bytes | `uint32` | Must equal `0x54585258` (`"TXRX"` in ASCII). |
-| **`flags`** | `0x04` | 1 Byte | `uint8` | Bitmask: `0x01`=SYN, `0x02`=FIN, `0x04`=URG, `0x08`=COMPRESSED. |
-| **`reserved`** | `0x05` | 1 Byte | `uint8` | Reserved byte (must be `0x00`). |
-| **`stream_id`**| `0x06` | 2 Bytes | `uint16` | Logical Stream Identifier (`0` to `65535`). |
-| **`sequence_no`**| `0x08` | 8 Bytes | `uint64` | Monotonic Big-Endian Sequence Number. |
-| **`payload_len`**| `0x10` | 2 Bytes | `uint16` | Payload length in bytes ($0 \le N \le 4096$). |
-| **`header_crc`**| `0x12` | 2 Bytes | `uint16` | CRC-16 (Poly `0x1021`, Init `0xFFFF`) over header bytes `[0:18]`. |
-
-$$\text{Wire Frame} = \underbrace{\text{Header (20B)}}_{[0:20]} + \underbrace{\text{Payload (N Bytes)}}_{[20:20+N]} + \underbrace{\text{Frame CRC-32 (4B)}}_{[20+N:24+N]}$$
-
-* **Header CRC-16:** Computed strictly over the first 18 bytes (`[0:18]`). If corrupted, the decoder MUST raise `HeaderCorruptError` without processing payload.
-* **Frame CRC-32:** Computed strictly over `[0 : 20 + payload_len]` (Header + Payload combined, excluding the trailing 4-byte CRC-32). If corrupted, the decoder MUST raise `PayloadCorruptError`.
-* If `MAGIC != 0x54585258` or `reserved != 0x00`, the decoder MUST raise `InvalidMagicError`.
-* If `payload_len > 4096`, the decoder MUST raise `FrameOverflowError`.
+## Overview
+Implement a high-performance, discrete-event packet transceiver engine in Python (`engine/`). The system manages multi-stream binary packet encoding/decoding, lock-free ring buffering with priority preemption, gapless out-of-order reassembly, and microsecond-level telemetry.
 
 ---
 
-## 2. Lock-Free MPMC Ring Buffer Architecture
+## 1. Binary Wire Framing Specification
 
-The ring buffer operates on a fixed power-of-two capacity $C = 2^k$ (mask $M = C - 1$):
-* **Turn-Based Sequence Indexing:**
-  $$\text{slot\_idx} = \text{sequence\_no} \ \& \ M$$
-  Each slot tracks: `sequence_no`, `producer_turn`, `consumer_turn`, `priority` (0=Normal, 1=Medium, 2=High, 3=Critical), and `lease_expiry_tick`.
-* **Zero-Copy Slot Lease & Commit:**
-  * `acquire_lease(stream_id, priority, size) -> (lease_id, slot_idx)`
-  * `commit_lease(lease_id, data: bytes)`
-* **Priority Lease Preemption:**
-  * When buffer capacity is fully occupied, a new request with `priority >= 2` can preempt an expired or lower-priority uncommitted lease.
-* **Sequence Wraparound Invariant:**
-  * When `sequence_no` wraps from $2^{64}-1$ to $0$, slot indexing and turn arithmetic MUST continue seamlessly without deadlocks or buffer corruption.
+### Exact 20-Byte Header Layout (Network Big-Endian):
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       MAGIC (0x54585258)                      |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|     FLAGS     |    RESERVED   |           STREAM_ID           |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                                                               |
++                       SEQUENCE_NO (uint64)                    +
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|          PAYLOAD_LEN          |         HEADER_CRC16          |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                        PAYLOAD BYTES...                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                      FRAME_CRC32 (uint32)                     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
 
----
+### Protocol Fields & Validation Rules:
+1. **`MAGIC` (uint32, 4 bytes):** Must equal `0x54585258` (`"TXRX"`).
+2. **`FLAGS` (uint8, 1 byte):** Bitfield flags.
+3. **`RESERVED` (uint8, 1 byte):** Must be `0x00`.
+4. **`STREAM_ID` (uint16, 2 bytes):** Multi-stream identifier ($1 \le 	ext{stream\_id} \le 65535$).
+5. **`SEQUENCE_NO` (uint64, 8 bytes):** Monotonic sequence counter. Streams may begin at any arbitrary `uint64` start value.
+6. **`PAYLOAD_LEN` (uint16, 2 bytes):** Length of payload bytes ($0 \le N \le 4096$).
+7. **`HEADER_CRC16` (uint16, 2 bytes):** CRC-16 (Polynomial `0x1021`, initial `0xFFFF`) calculated strictly over header bytes `[0:18]`.
+8. **`FRAME_CRC32` (uint32, 4 bytes):** CRC-32 (IEEE 802.3 standard) calculated strictly over the full frame prefix `[0:20+N]`.
 
-## 3. Gapless Sliding Reassembly Window
-
-* Multi-producer out-of-order commits are ingested into a stream reassembly table.
-* The consumer MUST deliver strictly **gapless contiguous sequence numbers** per `stream_id`. If sequence $K+1$ arrives before $K$, it must buffer $K+1$ until $K$ is committed.
-
----
-
-## 4. Deterministic Discrete-Event Virtual Clock
-
-* All concurrency is evaluated through a deterministic `VirtualClock`:
-  * `clock.tick(delta=1)` advances discrete logical time.
-  * Backpressure policies: `BLOCK` (yields until slot freed), `DROP_OLDEST` (drops lowest-turn unconsumed slot), `REJECT` (raises `BufferOverflowError`).
-* `get_telemetry()` returns `{total_frames, dropped_frames, committed_bytes, p50_latency_ticks, p99_latency_ticks}`.
-
----
-
-## Public API Contract
-
-Candidate implementations under `engine.transceiver` must expose:
-
-### `Transceiver(capacity: int = 128, backpressure: str = "BLOCK")`
-* `encode_frame(stream_id: int, seq_no: int, flags: int, payload: bytes) -> bytes`
-* `decode_frame(frame_bytes: bytes) -> tuple[dict, bytes]`
-* `publish(stream_id: int, seq_no: int, priority: int, payload: bytes) -> bool`
-* `poll_stream(stream_id: int) -> list[tuple[int, bytes]]` (Returns contiguous committed `(seq_no, payload)`)
-* `step_clock(ticks: int = 1)`
-* `get_telemetry() -> dict`
-
-### Exception Hierarchy (`engine.codec`):
-* `TransceiverError(Exception)`
-* `InvalidMagicError(TransceiverError)`
-* `HeaderCorruptError(TransceiverError)`
-* `PayloadCorruptError(TransceiverError)`
-* `FrameOverflowError(TransceiverError)`
-* `BufferOverflowError(TransceiverError)`
-* `SlotStateViolationError(TransceiverError)`
+### Integrity Ordering Principle (Crucial):
+* **Integrity Validation First:** When decoding a raw byte stream, the **Header CRC-16 check MUST execute BEFORE field interpretation** (such as Magic, Reserved, or Flags). A corrupted byte in the header region (even inside the Magic bytes) constitutes header bit rot and must raise `HeaderCorruptError`.
+* If Header CRC-16 is valid but the Magic field does not match, raise `InvalidMagicError`.
+* If Header CRC-16 is valid but Payload CRC-32 is corrupted, raise `PayloadCorruptError`.
+* If `PAYLOAD_LEN` exceeds `4096`, raise `FrameOverflowError`.
 
 ---
 
-## Grading & Partial Credit Rubric
+## 2. Lock-Free MPMC Ring Buffer & Concurrency Subsystem
 
-The evaluation suite (`tests/test_outputs.py`) executes a 4-tier grading pipeline:
+1. **Power-of-Two Masking:** Capacity $C$ must be a power of 2 ($M = C - 1$).
+2. **Multi-Stream Linear Collision Probing:** Base slot is calculated as:
+   $$	ext{base\_slot} = (	ext{stream\_id} 	imes 37 + 	ext{sequence\_no}) \ \& \ M$$
+   If the slot is occupied, probe forward linearly up to $C$ steps.
+3. **Turn-Based Lease Management & Epoch Tokens:**
+   * Acquiring a slot allocates a lease stamped with `(lease_id, lease_epoch, expiry_tick)`.
+   * Default lease duration is 10 logical ticks.
+   * Committing requires validating that the caller's `lease_id` and `lease_epoch` match the slot's current state.
+4. **Strict Priority Preemption:**
+   * When the buffer is saturated, higher-priority streams ($	ext{priority} \in \{0, 1, 2, 3\}$) can only preempt **UNCOMMITTED** slot leases of lower priority.
+   * **COMMITTED** unread data MUST NEVER be destroyed or overwritten by preemption.
+5. **Backpressure Modes:**
+   * `BLOCK`: Fails acquisition and returns `False` if no uncommitted slot can be allocated or preempted.
+   * `DROP_OLDEST`: Evicts the slot with the lowest sequence number among committed slots.
+   * `REJECT`: Immediately returns `False` without waiting.
 
-| Tier | Component | Weight | Criteria |
-|:---|:---|:---:|:---|
-| **Tier 1** | **Wire Framing & Nested CRC Safety** | `0.250` | 20B Header, CRC-16 [0:18], CRC-32 [0:20+N], Magic & boundary traps. |
-| **Tier 2** | **Lock-Free MPMC Ring Buffer** | `0.250` | Turn-based indexing, zero-copy slot leasing, uint64 wraparound ($2^{64}-16 \to 0$). |
-| **Tier 3** | **Reassembly, Preemption & Telemetry** | `0.250` | Gapless sliding window, priority preemption, and p50/p99 latency tracking. |
-| **Tier 4** | **1,600-State Combinatorial Matrix** | `0.250` | 16 distinct operational & fault scenarios $\times 100$ variations (1,600 states). |
+---
 
-* **Total Score:** $\sum \text{Tiers} = \mathbf{1.0000}$
-* **Passing Threshold:** $\text{Score} \ge \mathbf{0.5000}$
+## 3. Gapless Stream Reassembly Engine
+
+1. **Dynamic Stream Initialization:**
+   * A stream's initial expected sequence number is established dynamically by the **first received packet** for that `stream_id`. Streams do not necessarily start at 0.
+2. **Strict In-Order Delivery:**
+   * When `poll_stream(stream_id)` is invoked, the engine must deliver strictly contiguous packets starting from `expected_seq`.
+   * If a gap is detected (e.g. sequence $K+2$ arrives while $K+1$ is missing), future packets must remain buffered in an out-of-order min-heap staging queue, and `poll_stream()` must return only packets up to the gap (or empty `[]` if the gap is at the head).
+   * Once the missing packet $K+1$ arrives, both $K+1$ and all contiguous staged packets must be emitted.
+3. **Modular uint64 Wraparound Arithmetic:**
+   * Sequence distance calculations across the uint64 boundary ($2^{64}-1 	o 0$) must use directional modular arithmetic:
+     $$\Delta = (	ext{seq\_no} - 	ext{expected\_seq}) \ \& \ ((1 \ll 64) - 1)$$
+     If $\Delta == 0$: in-order packet. If $0 < \Delta < 2^{63}$: future packet. If $\Delta \ge 2^{63}$: stale/duplicate packet.
+
+---
+
+## 4. Discrete-Event Scheduler & Telemetry
+
+1. **Deterministic Virtual Clock:** Discrete tick progression via `step_clock(ticks)`.
+2. **Histogram & Percentiles:** Calculate p50 and p99 transaction latencies in logical ticks.
+3. **Telemetry Exporter:** `get_telemetry()` returns `total_frames`, `dropped_frames`, `committed_bytes`, `p50_latency_ticks`, `p99_latency_ticks`.
+
+---
+
+## 5. Evaluation & Rubric
+
+* **Tier 1 (25%):** Binary wire framing, nested CRC-16/CRC-32 verification, integrity ordering.
+* **Tier 2 (25%):** MPMC ring buffer, power-of-two linear probing, uint64 wraparound ($2^{64}-16 	o 0$).
+* **Tier 3 (25%):** Gapless sliding window reassembly, dynamic stream initialization, telemetry percentiles.
+* **Tier 4 (25%):** 1,600-state combinatorial stress matrix across 16 invariant topologies.
