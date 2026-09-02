@@ -1,5 +1,5 @@
-"""Transceiver Main Coordinator Engine (Modular Architecture)."""
-from engine.framing import encode_full_frame, decode_full_frame, HEADER_SIZE
+"""Transceiver Main Coordinator Engine (Gapless Reassembly Wired)."""
+from engine.framing import encode_full_frame, decode_full_frame
 from engine.buffer import MPMCRingBuffer
 from engine.reassembly import ReassemblyEngine
 from engine.scheduler import VirtualClock
@@ -32,22 +32,24 @@ class Transceiver:
         encoded = self.encode_frame(stream_id, seq_no, flags, payload)
         self.ring_buffer.commit_lease(lease_id, encoded)
 
-        # Ingest into stream reassembly sliding window
-        self.reassembly.ingest(stream_id, seq_no, payload)
-
         latency = self.clock.current_tick - start_tick + 1
         self.histogram.record_latency(latency)
         self.logger.log_commit(len(payload))
         return True
 
     def poll_stream(self, stream_id: int) -> list[tuple[int, bytes]]:
-        # Drain ready in-order frames from ring buffer slots
+        # Drain unconsumed committed slots from ring buffer
         raw_slots = self.ring_buffer.drain_stream_slots(stream_id)
-        ready = []
-        for seq_no, payload_bytes in raw_slots:
+        
+        # Ingest each raw slot into the ReassemblyEngine to enforce strict gapless order
+        ready_packets = []
+        for seq_no, payload_bytes in sorted(raw_slots, key=lambda x: x[0]):
             meta, payload = self.decode_frame(payload_bytes)
-            ready.append((meta["sequence_no"], payload))
-        return sorted(ready, key=lambda x: x[0])
+            # Ingest into sliding window reassembler
+            emitted = self.reassembly.ingest(stream_id, meta["sequence_no"], payload)
+            ready_packets.extend(emitted)
+            
+        return ready_packets
 
     def step_clock(self, ticks: int = 1):
         self.clock.tick(ticks)

@@ -1,4 +1,5 @@
-"""Combinatorial Evaluation Matrix (1,600 States across 16 Invariant Topologies)."""
+"""Combinatorial Evaluation Matrix (1,600 States with Hardened S09 and S10 Traps)."""
+from engine.framing import HeaderCorruptError, PayloadCorruptError, InvalidMagicError, FrameOverflowError
 
 class TestMatrixGenerator:
     @staticmethod
@@ -67,7 +68,7 @@ class TestMatrixGenerator:
                 try:
                     tx.decode_frame(bytes(corrupted))
                     return False
-                except Exception:
+                except HeaderCorruptError:
                     pass
 
             elif scenario == 6:
@@ -77,7 +78,7 @@ class TestMatrixGenerator:
                 try:
                     tx.decode_frame(bytes(corrupted))
                     return False
-                except Exception:
+                except PayloadCorruptError:
                     pass
 
             elif scenario == 7:
@@ -95,21 +96,44 @@ class TestMatrixGenerator:
                 if not r or r[0] != (base_seq, data):
                     return False
 
+            # S09: STRICT GAPLESS REASSEMBLY WITH MISSING GAP
             elif scenario == 9:
-                tx.publish(stream_id=1, seq_no=var_id + 1, priority=0, payload=b"future")
-                tx.publish(stream_id=1, seq_no=var_id, priority=0, payload=b"first")
-                r = tx.poll_stream(1)
-                if len(r) != 2 or r[0][1] != b"first" or r[1][1] != b"future":
+                start_seq = var_id * 10
+                # Publish sequence start_seq
+                tx.publish(stream_id=1, seq_no=start_seq, priority=0, payload=b"packet_0")
+                r0 = tx.poll_stream(1)
+                if r0 != [(start_seq, b"packet_0")]:
                     return False
 
+                # Publish sequence start_seq + 2 (without start_seq + 1)
+                tx.publish(stream_id=1, seq_no=start_seq + 2, priority=0, payload=b"packet_2")
+                # Poll MUST return [] because start_seq + 1 is missing!
+                r_gap = tx.poll_stream(1)
+                if len(r_gap) != 0:
+                    return False  # Violated gapless contract!
+
+                # Publish the missing start_seq + 1 -> now must emit both (start_seq+1) and (start_seq+2)
+                tx.publish(stream_id=1, seq_no=start_seq + 1, priority=0, payload=b"packet_1")
+                r_flush = tx.poll_stream(1)
+                if len(r_flush) != 2 or r_flush[0][1] != b"packet_1" or r_flush[1][1] != b"packet_2":
+                    return False
+
+            # S10: STRICT PREEMPTION INVARIANT (NEVER DESTROY COMMITTED DATA)
             elif scenario == 10:
                 p_tx = transceiver_cls(capacity=2, backpressure="BLOCK")
-                l1 = p_tx.ring_buffer.acquire_lease(stream_id=1, seq_no=1, priority=0, current_tick=0)
-                l2 = p_tx.ring_buffer.acquire_lease(stream_id=1, seq_no=2, priority=0, current_tick=0)
-                l3 = p_tx.ring_buffer.acquire_lease(stream_id=2, seq_no=1, priority=3, current_tick=0)
-                if l3 == -1:
-                    return False
-                if not p_tx.ring_buffer.commit_lease(l3, data):
+                # Fill buffer with 2 COMMITTED packets
+                p_tx.publish(stream_id=1, seq_no=1, priority=0, payload=b"committed_01")
+                p_tx.publish(stream_id=1, seq_no=2, priority=0, payload=b"committed_02")
+
+                # Try to publish high-priority packet when buffer is full of COMMITTED data.
+                # Under BLOCK policy, it CANNOT preempt committed data -> must return False!
+                res_high = p_tx.publish(stream_id=2, seq_no=1, priority=3, payload=data)
+                if res_high is not False:
+                    return False  # Overwrote committed data!
+
+                # Draining stream 1 must return BOTH original committed packets intact!
+                drained = p_tx.poll_stream(1)
+                if len(drained) != 2 or drained[0][1] != b"committed_01" or drained[1][1] != b"committed_02":
                     return False
 
             elif scenario == 11:
@@ -136,7 +160,7 @@ class TestMatrixGenerator:
                 try:
                     tx.decode_frame(bytes(bad_magic))
                     return False
-                except Exception:
+                except (InvalidMagicError, HeaderCorruptError):
                     pass
 
             elif scenario == 14:

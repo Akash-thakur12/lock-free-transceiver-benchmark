@@ -1,9 +1,10 @@
 #!/bin/bash
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET_DIR="${TARGET_ENGINE:-/app/engine}"
+TASK_ROOT="$SCRIPT_DIR/.."
+TARGET_DIR="${TARGET_ENGINE:-$TASK_ROOT/environment/engine}"
 
-echo "Deploying solution engine from $SCRIPT_DIR/engine to $TARGET_DIR..."
+echo "Deploying solution engine to $TARGET_DIR..."
 mkdir -p "$TARGET_DIR"
 cp -r "$SCRIPT_DIR/engine/"* "$TARGET_DIR/"
-echo "Solution engine deployment complete."
+echo "Solution deployment complete."

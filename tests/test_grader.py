@@ -1,4 +1,4 @@
-"""4-Tier Deterministic Grader Pipeline for Lock-Free Transceiver Benchmark."""
+"""4-Tier Deterministic Grader Pipeline with Strict Exception Validation."""
 import os
 import sys
 import ast
@@ -51,13 +51,13 @@ def eval_tier1_wire_framing(Transceiver, HeaderCorruptError, PayloadCorruptError
         if meta["magic"] != 0x54585258 or meta["stream_id"] != 42 or meta["sequence_no"] != 1001 or payload != b"test_payload_123":
             return 0.0
 
-        # Boundary checks: 4096 succeeds, 4097 raises FrameOverflowError
+        # Boundary checks: 4096 succeeds, 4097 raises STRICT FrameOverflowError
         tx.encode_frame(stream_id=1, seq_no=1, flags=0, payload=b"A"*4096)
         try:
             tx.encode_frame(stream_id=1, seq_no=1, flags=0, payload=b"A"*4097)
             return 0.0
-        except (FrameOverflowError, Exception):
-            pass
+        except FrameOverflowError:
+            pass  # STRICT exception match
 
         # Header CRC corruption trap
         b_hdr = bytearray(raw)
@@ -65,8 +65,8 @@ def eval_tier1_wire_framing(Transceiver, HeaderCorruptError, PayloadCorruptError
         try:
             tx.decode_frame(bytes(b_hdr))
             return 0.0
-        except (HeaderCorruptError, Exception):
-            pass
+        except HeaderCorruptError:
+            pass  # STRICT exception match
 
         # Frame CRC corruption trap
         b_body = bytearray(raw)
@@ -74,7 +74,16 @@ def eval_tier1_wire_framing(Transceiver, HeaderCorruptError, PayloadCorruptError
         try:
             tx.decode_frame(bytes(b_body))
             return 0.0
-        except (PayloadCorruptError, Exception):
+        except PayloadCorruptError:
+            pass  # STRICT exception match
+
+        # Invalid Magic trap
+        b_magic = bytearray(raw)
+        b_magic[0] = 0x00
+        try:
+            tx.decode_frame(bytes(b_magic))
+            return 0.0
+        except (InvalidMagicError, HeaderCorruptError):
             pass
 
         return 0.250
@@ -112,13 +121,22 @@ def eval_tier3_reassembly_and_telemetry(Transceiver) -> float:
     try:
         tx = Transceiver(capacity=64, backpressure="BLOCK")
 
-        # Out-of-order publication
-        tx.publish(stream_id=7, seq_no=2, priority=0, payload=b"packet_2")
+        # Initialize stream 7 with sequence 1
         tx.publish(stream_id=7, seq_no=1, priority=0, payload=b"packet_1")
-        
-        # Poll must emit strictly in contiguous sequence (1, then 2)
+        r1 = tx.poll_stream(7)
+        if r1 != [(1, b"packet_1")]:
+            return 0.0
+
+        # Now publish seq 3 (without seq 2) -> poll MUST return [] because seq 2 is missing!
+        tx.publish(stream_id=7, seq_no=3, priority=0, payload=b"packet_3")
+        r_premature = tx.poll_stream(7)
+        if len(r_premature) != 0:
+            return 0.0  # VIOLATED GAPLESS CONTRACT!
+
+        # Publish missing seq 2 -> poll must now emit BOTH seq 2 and seq 3 in contiguous order
+        tx.publish(stream_id=7, seq_no=2, priority=0, payload=b"packet_2")
         res = tx.poll_stream(7)
-        if len(res) != 2 or res[0] != (1, b"packet_1") or res[1] != (2, b"packet_2"):
+        if len(res) != 2 or res[0] != (2, b"packet_2") or res[1] != (3, b"packet_3"):
             return 0.0
 
         # Telemetry validation
@@ -170,7 +188,7 @@ def run_grader(engine_dir: str) -> dict:
 
     try:
         tx_mod = importlib.import_module("engine.transceiver")
-        codec_mod = importlib.import_module("engine.codec")
+        codec_mod = importlib.import_module("engine.framing")
         Transceiver = getattr(tx_mod, "Transceiver")
         HeaderCorruptError = getattr(codec_mod, "HeaderCorruptError")
         PayloadCorruptError = getattr(codec_mod, "PayloadCorruptError")
