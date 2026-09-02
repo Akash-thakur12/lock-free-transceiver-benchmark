@@ -1,0 +1,35 @@
+version = "1.0"
+
+[task]
+name = "benchmark/lock-free-ring-buffer-transceiver"
+description = "Implement and calibrate a high-throughput, discrete-event lock-free ring buffer transceiver and zero-copy binary framing stream engine across a 1,600-state combinatorial matrix."
+difficulty = "hard"
+category = "systems-programming"
+timeout_sec = 2700
+allow_internet = false
+tags = ["systems-programming", "distributed-systems", "lock-free", "ring-buffer", "zero-copy", "wire-protocol", "long-horizon"]
+
+[task.difficulty_explanation]
+provenance = "Synthetic 1,600-state combinatorial matrix derived from discrete-event systems engineering specifications, modeling high-performance lock-free MPMC queue designs, zero-copy packet framing, priority lease preemption, and gapless sliding reassembly windows."
+differentiation_notes = "This task combines several distinct systems engineering mechanisms not found in textbook implementations: (1) an exact 20-byte big-endian binary frame layout with nested Header CRC-16 (poly 0x1021 over [0:18]) and Frame CRC-32 (IEEE 802.3 over [0:20+N]); (2) a power-of-two turn-based MPMC ring buffer supporting zero-copy slot leasing, explicit uint64 sequence wraparound across 2^64-16 to 0, and priority lease preemption; (3) a gapless sliding window reassembly engine delivering strictly contiguous in-order stream sequences; (4) a 100% deterministic discrete-event virtual clock engine with backpressure policies (BLOCK, DROP_OLDEST, REJECT); and (5) a 1,600-case combinatorial test matrix spanning 16 distinct operational and fault topologies."
+relevance = "Evaluates low-level binary protocol modeling, lock-free concurrency state machines, packet reassembly buffers, and deterministic systems invariant preservation."
+failure_cruxes = [
+    "Miscalculating the nested Header CRC-16 boundary ([0:18]) versus Frame CRC-32 boundary ([0:20+N]).",
+    "Silent sequence corruption during uint64 sequence wraparound across 2^64-1 to 0.",
+    "Deadlocks or slot leaks during priority lease preemption under full buffer saturation.",
+    "Out-of-order stream emission violating the gapless reassembly window contract."
+]
+
+[scoring]
+type = "continuous"
+min_score = 0.0
+max_score = 1.0
+pass_threshold = 0.50
+
+[hardware]
+cpu = 2
+memory_mb = 2048
+
+[environment]
+image = "python:3.11-slim"
+workdir = "/app"
